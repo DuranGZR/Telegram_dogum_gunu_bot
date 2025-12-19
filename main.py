@@ -64,6 +64,96 @@ async def liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+async def sil(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Yetkin yok.")
+        return
+
+    try:
+        name = " ".join(context.args)
+
+        cursor.execute(
+            "DELETE FROM birthdays WHERE name=? AND chat_id=?",
+            (name, update.effective_chat.id)
+        )
+        conn.commit()
+
+        if cursor.rowcount > 0:
+            await update.message.reply_text(f"✅ {name} silindi.")
+        else:
+            await update.message.reply_text(f"❌ {name} bulunamadı.")
+    except:
+        await update.message.reply_text("Kullanım: /sil İsim Soyisim")
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = """
+🎂 **Doğum Günü Hatırlatıcı Bot**
+
+📋 **Komutlar:**
+
+🔹 `/ekle İsim Soyisim YYYY-MM-DD`
+   Yeni doğum günü ekle
+
+🔹 `/liste`
+   Tüm doğum günlerini listele
+
+🔹 `/sil İsim Soyisim`
+   Doğum gününü sil
+
+🔹 `/stats`
+   İstatistikleri göster
+
+🔹 `/help`
+   Bu yardım menüsü
+
+⏰ **Otomatik Hatırlatma:**
+Her gün saat 09:00'da, yarın doğum günü olanları hatırlatırım! 🎉
+    """
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cursor.execute(
+        "SELECT name, date FROM birthdays WHERE chat_id=?",
+        (update.effective_chat.id,)
+    )
+    rows = cursor.fetchall()
+
+    if not rows:
+        await update.message.reply_text("📭 Henüz kayıt yok.")
+        return
+
+    total = len(rows)
+    
+    # Bu ay doğum günü olanlar
+    current_month = datetime.now().strftime("%m")
+    this_month = sum(1 for _, date in rows if datetime.strptime(date, "%Y-%m-%d").strftime("%m") == current_month)
+    
+    # Önümüzdeki 30 gün içinde doğum günü olanlar
+    upcoming = 0
+    today = datetime.now()
+    for _, date in rows:
+        bd = datetime.strptime(date, "%Y-%m-%d")
+        # Bu yılki doğum günü
+        bd_this_year = bd.replace(year=today.year)
+        if bd_this_year < today:
+            bd_this_year = bd.replace(year=today.year + 1)
+        
+        days_until = (bd_this_year - today).days
+        if 0 <= days_until <= 30:
+            upcoming += 1
+
+    text = f"""
+📊 **İstatistikler**
+
+👥 Toplam kayıt: **{total}** kişi
+📅 Bu ay: **{this_month}** kişi
+🎯 Önümüzdeki 30 gün: **{upcoming}** kişi
+    """
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
 async def check_birthdays(app):
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%m-%d")
 
@@ -81,6 +171,10 @@ def main():
     
     app.add_handler(CommandHandler("ekle", ekle))
     app.add_handler(CommandHandler("liste", liste))
+    app.add_handler(CommandHandler("sil", sil))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("stats", stats))
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(lambda: asyncio.create_task(check_birthdays(app)), "cron", hour=9)
