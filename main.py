@@ -1,10 +1,11 @@
 import os
 import asyncio
+import csv
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from db import cursor, conn
@@ -44,6 +45,113 @@ async def ekle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Kullanım: /ekle İsim Soyisim YYYY-MM-DD"
         )
+
+
+async def toplu_ekle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """CSV dosyası yüklemek için talimat gönder"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Yetkin yok.")
+        return
+    
+    text = """
+📋 **Toplu Ekleme**
+
+CSV veya TXT dosyası yükleyin.
+
+**Format:**
+```
+isim,tarih
+Ahmet Yılmaz,2000-05-15
+Ayşe Demir,1998-08-20
+Mehmet Kaya,1995-03-10
+```
+
+📝 **Excel'den nasıl oluşturulur:**
+1. Excel'de liste hazırlayın
+2. A sütunu: İsim Soyisim
+3. B sütunu: Tarih (YYYY-MM-DD)
+4. İlk satır: isim,tarih
+5. Farklı Kaydet → CSV (virgülle ayrılmış)
+
+📤 Dosyayı buraya yükleyin!
+    """
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Yüklenen CSV dosyasını işle"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Yetkin yok.")
+        return
+    
+    # Dosya türü kontrolü
+    file_name = update.message.document.file_name
+    if not (file_name.endswith('.csv') or file_name.endswith('.txt')):
+        await update.message.reply_text("❌ Sadece .csv veya .txt dosyası yükleyin!")
+        return
+    
+    await update.message.reply_text("⏳ Dosya işleniyor...")
+    
+    try:
+        # Dosyayı indir
+        file = await context.bot.get_file(update.message.document.file_id)
+        file_path = f"temp_{file_name}"
+        await file.download_to_drive(file_path)
+        
+        # CSV'yi oku ve veritabanına ekle
+        added = 0
+        errors = []
+        
+        with open(file_path, 'r', encoding='utf-8') as csvfile:
+            reader = csv.reader(csvfile)
+            next(reader)  # Başlık satırını atla
+            
+            for i, row in enumerate(reader, start=2):
+                try:
+                    if len(row) < 2:
+                        errors.append(f"Satır {i}: Eksik veri")
+                        continue
+                    
+                    name = row[0].strip()
+                    date = row[1].strip()
+                    
+                    # Tarih formatı kontrolü
+                    datetime.strptime(date, "%Y-%m-%d")
+                    
+                    # Veritabanına ekle
+                    cursor.execute(
+                        "INSERT INTO birthdays (name, date, chat_id) VALUES (?, ?, ?)",
+                        (name, date, update.effective_chat.id)
+                    )
+                    added += 1
+                    
+                except ValueError:
+                    errors.append(f"Satır {i}: Hatalı tarih formatı ({date})")
+                except Exception as e:
+                    errors.append(f"Satır {i}: {str(e)}")
+        
+        conn.commit()
+        
+        # Geçici dosyayı sil
+        os.remove(file_path)
+        
+        # Sonuç mesajı
+        result = f"✅ **{added}** kişi başarıyla eklendi!\n\n"
+        
+        if errors:
+            result += "⚠️ **Hatalar:**\n"
+            for error in errors[:10]:  # İlk 10 hatayı göster
+                result += f"• {error}\n"
+            if len(errors) > 10:
+                result += f"\n... ve {len(errors) - 10} hata daha"
+        
+        await update.message.reply_text(result, parse_mode="Markdown")
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Dosya işlenirken hata oluştu:\n{str(e)}")
+        # Hata durumunda dosyayı temizle
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 
 async def liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -94,6 +202,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🔹 `/ekle İsim Soyisim YYYY-MM-DD`
    Yeni doğum günü ekle
+
+🔹 `/toplu_ekle`
+   CSV dosyası ile toplu ekleme
 
 🔹 `/liste`
    Tüm doğum günlerini listele
@@ -170,11 +281,15 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("ekle", ekle))
+    app.add_handler(CommandHandler("toplu_ekle", toplu_ekle))
     app.add_handler(CommandHandler("liste", liste))
     app.add_handler(CommandHandler("sil", sil))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("stats", stats))
+    
+    # CSV dosyası yükleme handler'ı
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(lambda: asyncio.create_task(check_birthdays(app)), "cron", hour=9)
