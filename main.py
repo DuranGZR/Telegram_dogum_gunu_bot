@@ -13,7 +13,7 @@ load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 ADMINS = list(map(int, os.getenv("ADMINS").split(",")))
-
+#sa
 
 def is_admin(user_id):
     return user_id in ADMINS
