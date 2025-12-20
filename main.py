@@ -8,7 +8,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from db import cursor, conn
+from db import execute_query, fetch_all, fetch_one, conn
 
 load_dotenv()
 
@@ -26,24 +26,35 @@ async def ekle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
+        if len(context.args) < 2:
+            await update.message.reply_text(
+                "Kullanım: /ekle İsim Soyisim YYYY-MM-DD"
+            )
+            return
+        
         # İsim ve soyisim birleştir (son argüman tarih)
         date = context.args[-1]
         name = " ".join(context.args[:-1])
 
+        # Tarih formatı kontrolü
         datetime.strptime(date, "%Y-%m-%d")
 
-        cursor.execute(
+        # Veritabanına ekle
+        execute_query(
             "INSERT INTO birthdays (name, date, chat_id) VALUES (?, ?, ?)",
             (name, date, update.effective_chat.id)
         )
-        conn.commit()
 
         await update.message.reply_text(
             f"✅ {name} için doğum günü eklendi: {date}"
         )
-    except:
+    except ValueError:
         await update.message.reply_text(
-            "Kullanım: /ekle İsim Soyisim YYYY-MM-DD"
+            "❌ Geçersiz tarih formatı! Kullanım: /ekle İsim Soyisim YYYY-MM-DD"
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Hata oluştu: {str(e)}\nKullanım: /ekle İsim Soyisim YYYY-MM-DD"
         )
 
 
@@ -92,6 +103,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("⏳ Dosya işleniyor...")
     
+    file_path = None
     try:
         # Dosyayı indir
         file = await context.bot.get_file(update.message.document.file_id)
@@ -119,7 +131,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     datetime.strptime(date, "%Y-%m-%d")
                     
                     # Veritabanına ekle
-                    cursor.execute(
+                    execute_query(
                         "INSERT INTO birthdays (name, date, chat_id) VALUES (?, ?, ?)",
                         (name, date, update.effective_chat.id)
                     )
@@ -129,8 +141,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     errors.append(f"Satır {i}: Hatalı tarih formatı ({date})")
                 except Exception as e:
                     errors.append(f"Satır {i}: {str(e)}")
-        
-        conn.commit()
         
         # Geçici dosyayı sil
         os.remove(file_path)
@@ -150,16 +160,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Dosya işlenirken hata oluştu:\n{str(e)}")
         # Hata durumunda dosyayı temizle
-        if os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
 
 async def liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cursor.execute(
+    rows = fetch_all(
         "SELECT name, date FROM birthdays WHERE chat_id=?",
         (update.effective_chat.id,)
     )
-    rows = cursor.fetchall()
 
     if not rows:
         await update.message.reply_text("📭 Kayıt yok.")
@@ -178,20 +187,23 @@ async def sil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
+        if not context.args:
+            await update.message.reply_text("Kullanım: /sil İsim Soyisim")
+            return
+            
         name = " ".join(context.args)
 
-        cursor.execute(
+        cur = execute_query(
             "DELETE FROM birthdays WHERE name=? AND chat_id=?",
             (name, update.effective_chat.id)
         )
-        conn.commit()
 
-        if cursor.rowcount > 0:
+        if cur.rowcount > 0:
             await update.message.reply_text(f"✅ {name} silindi.")
         else:
             await update.message.reply_text(f"❌ {name} bulunamadı.")
-    except:
-        await update.message.reply_text("Kullanım: /sil İsim Soyisim")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Hata: {str(e)}\nKullanım: /sil İsim Soyisim")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -225,11 +237,10 @@ Her gün saat 09:00'da, yarın doğum günü olanları hatırlatırım! 🎉
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cursor.execute(
+    rows = fetch_all(
         "SELECT name, date FROM birthdays WHERE chat_id=?",
         (update.effective_chat.id,)
     )
-    rows = cursor.fetchall()
 
     if not rows:
         await update.message.reply_text("📭 Henüz kayıt yok.")
@@ -268,8 +279,8 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_birthdays(app):
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%m-%d")
 
-    cursor.execute("SELECT name, date, chat_id FROM birthdays")
-    for name, date, chat_id in cursor.fetchall():
+    rows = fetch_all("SELECT name, date, chat_id FROM birthdays")
+    for name, date, chat_id in rows:
         if datetime.strptime(date, "%Y-%m-%d").strftime("%m-%d") == tomorrow:
             await app.bot.send_message(
                 chat_id,
@@ -292,7 +303,13 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(lambda: asyncio.create_task(check_birthdays(app)), "cron", hour=9)
+    scheduler.add_job(
+        lambda: check_birthdays(app),
+        "cron",
+        hour=9,
+        minute=0,
+        timezone="Europe/Istanbul"
+    )
     scheduler.start()
 
     print("🤖 Bot çalışıyor...")
